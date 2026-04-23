@@ -1,0 +1,429 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+#root{display:flex;flex-direction:column;align-items:center;padding:16px 8px;gap:12px;min-height:600px;}
+#hud{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;width:100%;max-width:420px;}
+.stat{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:8px 12px;text-align:center;}
+.stat-label{font-size:11px;color:var(--color-text-secondary);}
+.stat-val{font-size:20px;font-weight:500;color:var(--color-text-primary);}
+#game-wrap{position:relative;background:var(--color-background-secondary);border-radius:var(--border-radius-lg);border:0.5px solid var(--color-border-tertiary);overflow:hidden;}
+canvas{display:block;cursor:crosshair;}
+#overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;flex-direction:column;gap:14px;border-radius:var(--border-radius-lg);}
+#overlay.show{display:flex;}
+#overlay h2{font-size:24px;font-weight:500;color:#fff;}
+#overlay p{font-size:14px;color:rgba(255,255,255,0.75);text-align:center;}
+#overlay button{padding:10px 28px;font-size:14px;background:#fff;color:#111;border:none;border-radius:var(--border-radius-md);cursor:pointer;font-weight:500;}
+#overlay button:hover{background:#eee;}
+#ctrl{display:flex;gap:8px;}
+#ctrl button{font-size:13px;padding:6px 16px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-secondary);background:var(--color-background-primary);color:var(--color-text-primary);cursor:pointer;}
+#ctrl button:hover{background:var(--color-background-secondary);}
+#aim-line-info{font-size:12px;color:var(--color-text-tertiary);}
+</style>
+<h2 class="sr-only">Bubble shooter game with levels and score tracking.</h2>
+<div id="root">
+<div id="hud">
+  <div class="stat"><div class="stat-label">Score</div><div class="stat-val" id="s-score">0</div></div>
+  <div class="stat"><div class="stat-label">Level</div><div class="stat-val" id="s-level">1</div></div>
+  <div class="stat"><div class="stat-label">Bubbles</div><div class="stat-val" id="s-bubbles">30</div></div>
+  <div class="stat"><div class="stat-label">Best</div><div class="stat-val" id="s-best">0</div></div>
+</div>
+<div id="game-wrap">
+  <canvas id="c"></canvas>
+  <div id="overlay">
+    <h2 id="ov-title">Bubble Shooter</h2>
+    <p id="ov-msg">Pop groups of 3+ same-color bubbles.<br>Clear the board to advance!</p>
+    <button id="ov-btn">Play</button>
+  </div>
+</div>
+<div id="ctrl">
+  <button onclick="restartGame()">Restart</button>
+  <button onclick="skipLevel()">Skip level</button>
+</div>
+<div id="aim-line-info">Click or tap to shoot — aim with your cursor</div>
+</div>
+
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+const W=380,H=520;
+canvas.width=W;canvas.height=H;
+
+const R=18;
+const COLS=10;
+const ROW_H=Math.round(R*1.73);
+const COLORS=['#E24B4A','#378ADD','#639922','#EF9F27','#D4537E','#7F77DD','#1D9E75'];
+let state={score:0,level:1,bubbles:30,best:0,grid:[],shooter:{x:W/2,y:H-40,color:'',nextColor:''},angle:-Math.PI/2,projectile:null,gameOver:false,won:false,particles:[]};
+
+function randColor(n){const c=[...COLORS];c.length=Math.min(n,COLORS.length);return c[Math.floor(Math.random()*c.length)];}
+function colorsForLevel(l){return Math.min(3+l,7);}
+
+function makeGrid(level){
+  const rows=5+Math.min(level,5);
+  const nc=colorsForLevel(level);
+  const grid=[];
+  for(let r=0;r<rows;r++){
+    const cols=r%2===0?COLS:COLS-1;
+    const row=[];
+    for(let c=0;c<cols;c++) row.push({color:randColor(nc),r,c,popped:false});
+    grid.push(row);
+  }
+  return grid;
+}
+
+function cellXY(r,c){
+  const ox=r%2===0?R:R*2;
+  return{x:ox+c*R*2,y:R+r*ROW_H};
+}
+
+function drawBubble(x,y,color,alpha=1,scale=1){
+  ctx.save();
+  ctx.globalAlpha=alpha;
+  ctx.translate(x,y);
+  ctx.scale(scale,scale);
+  ctx.beginPath();
+  ctx.arc(0,0,R-1.5,0,Math.PI*2);
+  ctx.fillStyle=color;
+  ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.25)';
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-R*0.3,-R*0.3,R*0.28,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,255,255,0.35)';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGrid(){
+  state.grid.forEach((row,r)=>row.forEach((b,c)=>{
+    if(!b||b.popped)return;
+    const{x,y}=cellXY(r,c);
+    drawBubble(x,y,b.color);
+  }));
+}
+
+function drawShooter(){
+  const{x,y,color,nextColor}=state.shooter;
+  drawBubble(x,y,color);
+  ctx.fillStyle='rgba(255,255,255,0.15)';
+  ctx.beginPath();ctx.arc(x,y,R+3,0,Math.PI*2);ctx.stroke();
+  drawBubble(x+R*2.5,y,nextColor,0.7,0.75);
+  ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.font='10px sans-serif';
+  ctx.fillText('next',x+R*2.5-12,y+R+12);
+}
+
+function drawAimLine(){
+  if(state.projectile||state.gameOver||state.won)return;
+  const{x,y}=state.shooter;
+  const ang=state.angle;
+  ctx.save();
+  ctx.setLineDash([5,8]);
+  ctx.strokeStyle='rgba(255,255,255,0.3)';
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(x,y);
+  let cx=x,cy=y;
+  const dx=Math.cos(ang),dy=Math.sin(ang);
+  let reflected=false;
+  for(let i=0;i<3;i++){
+    let tx=cx+dx*300,ty=cy+dy*300;
+    if(tx<R){ty=cy+(R-cx)/dx*dy;tx=R;reflected=!reflected;}
+    if(tx>W-R){ty=cy+(W-R-cx)/dx*dy;tx=W-R;reflected=!reflected;}
+    ctx.lineTo(tx,ty);
+    if(ty<0)break;
+    cx=tx;cy=ty;
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawParticles(){
+  state.particles=state.particles.filter(p=>{
+    p.life-=0.04;
+    if(p.life<=0)return false;
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;
+    ctx.save();ctx.globalAlpha=p.life;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2);
+    ctx.fillStyle=p.color;ctx.fill();ctx.restore();
+    return true;
+  });
+}
+
+function spawnParticles(x,y,color){
+  for(let i=0;i<12;i++){
+    const ang=Math.random()*Math.PI*2;
+    const spd=1+Math.random()*3;
+    state.particles.push({x,y,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd-1,r:R*0.5,color,life:1});
+  }
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#1a1a2e';
+  ctx.fillRect(0,0,W,H);
+  const danger=R+state.grid.length*ROW_H;
+  if(danger>H-80){ctx.fillStyle='rgba(226,75,74,0.08)';ctx.fillRect(0,H-80,W,80);}
+  ctx.strokeStyle='rgba(255,255,255,0.06)';
+  ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(0,H-70);ctx.lineTo(W,H-70);ctx.stroke();
+  drawGrid();
+  drawAimLine();
+  if(state.projectile){
+    drawBubble(state.projectile.x,state.projectile.y,state.projectile.color);
+  }
+  drawShooter();
+  drawParticles();
+}
+
+function setHUD(){
+  document.getElementById('s-score').textContent=state.score;
+  document.getElementById('s-level').textContent=state.level;
+  document.getElementById('s-bubbles').textContent=state.bubbles;
+  document.getElementById('s-best').textContent=state.best;
+}
+
+function showOverlay(title,msg,btn){
+  const ov=document.getElementById('overlay');
+  document.getElementById('ov-title').textContent=title;
+  document.getElementById('ov-msg').innerHTML=msg;
+  document.getElementById('ov-btn').textContent=btn;
+  ov.classList.add('show');
+}
+function hideOverlay(){document.getElementById('overlay').classList.remove('show');}
+
+function initGame(keepScore){
+  if(!keepScore){state.score=0;}
+  state.grid=makeGrid(state.level);
+  state.bubbles=30+state.level*5;
+  state.projectile=null;
+  state.particles=[];
+  state.gameOver=false;
+  state.won=false;
+  const nc=colorsForLevel(state.level);
+  state.shooter.color=randColor(nc);
+  state.shooter.nextColor=randColor(nc);
+  state.shooter.x=W/2;state.shooter.y=H-40;
+  setHUD();
+}
+
+function restartGame(){
+  state.level=1;
+  state.score=0;
+  hideOverlay();
+  initGame(false);
+}
+
+function skipLevel(){
+  state.level++;
+  hideOverlay();
+  initGame(true);
+}
+
+function gridEmpty(){return state.grid.every(row=>row.every(b=>!b||b.popped));}
+
+function getCell(x,y){
+  for(let r=0;r<state.grid.length;r++){
+    for(let c=0;c<state.grid[r].length;c++){
+      const b=state.grid[r][c];
+      if(!b||b.popped)continue;
+      const pos=cellXY(r,c);
+      if(Math.hypot(pos.x-x,pos.y-y)<R*1.8)return{r,c};
+    }
+  }
+  return null;
+}
+
+function findSnap(x,y){
+  let best=null,bestD=Infinity;
+  for(let r=0;r<=state.grid.length;r++){
+    const cols=r%2===0?COLS:COLS-1;
+    for(let c=0;c<cols;c++){
+      const pos=cellXY(r,c);
+      if(pos.y>H-70)continue;
+      const occupied=(state.grid[r]&&state.grid[r][c]&&!state.grid[r][c].popped);
+      if(occupied)continue;
+      const d=Math.hypot(pos.x-x,pos.y-y);
+      if(d<bestD){bestD=d;best={r,c};}
+    }
+  }
+  return best;
+}
+
+function placeBubble(r,c,color){
+  while(state.grid.length<=r)state.grid.push([]);
+  if(!state.grid[r][c]||state.grid[r][c].popped){
+    state.grid[r][c]={color,r,c,popped:false};
+  }
+}
+
+function neighbors(r,c){
+  const even=r%2===0;
+  const dirs=even?[[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]]:[[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]];
+  return dirs.map(([dr,dc])=>[r+dr,c+dc]).filter(([nr,nc])=>nr>=0&&nc>=0&&state.grid[nr]&&state.grid[nr][nc]&&!state.grid[nr][nc].popped);
+}
+
+function flood(r,c,color,visited){
+  const key=`${r},${c}`;
+  if(visited.has(key))return[];
+  const b=state.grid[r]&&state.grid[r][c];
+  if(!b||b.popped||b.color!==color)return[];
+  visited.add(key);
+  let group=[{r,c}];
+  neighbors(r,c).forEach(([nr,nc])=>{group=group.concat(flood(nr,nc,color,visited));});
+  return group;
+}
+
+function findFloating(){
+  const anchored=new Set();
+  const cols=state.grid[0]?state.grid[0].length:COLS;
+  for(let c=0;c<cols;c++){
+    if(state.grid[0]&&state.grid[0][c]&&!state.grid[0][c].popped)bfs(0,c,anchored);
+  }
+  const floating=[];
+  state.grid.forEach((row,r)=>row.forEach((b,c)=>{
+    if(b&&!b.popped&&!anchored.has(`${r},${c}`))floating.push({r,c});
+  }));
+  return floating;
+}
+
+function bfs(r,c,visited){
+  const q=[[r,c]];
+  while(q.length){
+    const[cr,cc]=q.shift();
+    const key=`${cr},${cc}`;
+    if(visited.has(key))continue;
+    visited.add(key);
+    neighbors(cr,cc).forEach(n=>q.push(n));
+  }
+}
+
+function popGroup(r,c,color){
+  const group=flood(r,c,color,new Set());
+  if(group.length<3)return 0;
+  group.forEach(({r,c})=>{
+    const pos=cellXY(r,c);
+    spawnParticles(pos.x,pos.y,state.grid[r][c].color);
+    state.grid[r][c].popped=true;
+  });
+  const floating=findFloating();
+  floating.forEach(({r,c})=>{
+    const pos=cellXY(r,c);
+    spawnParticles(pos.x,pos.y,state.grid[r][c].color);
+    state.grid[r][c].popped=true;
+  });
+  return group.length+floating.length;
+}
+
+function shoot(){
+  if(state.projectile||state.gameOver||state.won||state.bubbles<=0)return;
+  const ang=state.angle;
+  state.bubbles--;
+  state.projectile={
+    x:state.shooter.x,y:state.shooter.y,
+    color:state.shooter.color,
+    vx:Math.cos(ang)*8,vy:Math.sin(ang)*8
+  };
+  state.shooter.color=state.shooter.nextColor;
+  state.shooter.nextColor=randColor(colorsForLevel(state.level));
+  setHUD();
+}
+
+function updateProjectile(){
+  const p=state.projectile;
+  if(!p)return;
+  p.x+=p.vx;p.y+=p.vy;
+  if(p.x<R){p.x=R;p.vx*=-1;}
+  if(p.x>W-R){p.x=W-R;p.vx*=-1;}
+  if(p.y<R){
+    const snap=findSnap(p.x,p.y)||{r:0,c:0};
+    landBubble(snap.r,snap.c,p.color);
+    state.projectile=null;return;
+  }
+  const hit=getCell(p.x,p.y);
+  if(hit){
+    const snap=findSnap(p.x-p.vx,p.y-p.vy)||hit;
+    landBubble(snap.r,snap.c,p.color);
+    state.projectile=null;
+  }
+}
+
+function landBubble(r,c,color){
+  placeBubble(r,c,color);
+  const popped=popGroup(r,c,color);
+  if(popped>0){
+    const bonus=popped>=10?3:popped>=6?2:1;
+    state.score+=popped*10*state.level*bonus;
+    setHUD();
+  }
+  if(gridEmpty()){
+    state.won=true;
+    state.score+=state.bubbles*5*state.level;
+    if(state.score>state.best)state.best=state.score;
+    setHUD();
+    setTimeout(()=>{
+      showOverlay(`Level ${state.level} cleared!`,`+${state.bubbles*5*state.level} bonus points!<br>Score: ${state.score}`,'Next level');
+    },600);
+    return;
+  }
+  const maxY=Math.max(...state.grid.flatMap((row,r)=>row.map((b,c)=>b&&!b.popped?cellXY(r,c).y:-Infinity)));
+  if(maxY>H-75){
+    state.gameOver=true;
+    if(state.score>state.best)state.best=state.score;
+    setHUD();
+    setTimeout(()=>{
+      showOverlay('Game over',`Final score: ${state.score}<br>Level: ${state.level}`,'Play again');
+    },600);
+    return;
+  }
+  if(state.bubbles<=0&&!state.gameOver&&!state.won){
+    state.gameOver=true;
+    if(state.score>state.best)state.best=state.score;
+    setHUD();
+    setTimeout(()=>showOverlay('Out of bubbles!',`Score: ${state.score}`,'Try again'),600);
+  }
+}
+
+function loop(){
+  updateProjectile();
+  render();
+  requestAnimationFrame(loop);
+}
+
+canvas.addEventListener('mousemove',e=>{
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+  const dx=mx-state.shooter.x,dy=my-state.shooter.y;
+  let ang=Math.atan2(dy,dx);
+  ang=Math.max(-Math.PI+0.2,Math.min(-0.2,ang));
+  state.angle=ang;
+});
+
+canvas.addEventListener('click',e=>{
+  if(state.gameOver||state.won)return;
+  shoot();
+});
+
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const rect=canvas.getBoundingClientRect();
+  const t=e.touches[0];
+  const mx=t.clientX-rect.left,my=t.clientY-rect.top;
+  const dx=mx-state.shooter.x,dy=my-state.shooter.y;
+  let ang=Math.atan2(dy,dx);
+  ang=Math.max(-Math.PI+0.2,Math.min(-0.2,ang));
+  state.angle=ang;
+  if(!state.gameOver&&!state.won)shoot();
+},{passive:false});
+
+document.getElementById('ov-btn').addEventListener('click',()=>{
+  if(state.won){state.level++;}
+  else{state.level=1;state.score=0;}
+  hideOverlay();
+  initGame(state.won);
+});
+
+initGame(false);
+showOverlay('Bubble Shooter','Pop groups of 3+ same-color bubbles.<br>Clear the board to advance!','Play');
+loop();
+</script>
